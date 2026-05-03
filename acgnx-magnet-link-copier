@@ -1,0 +1,317 @@
+// ==UserScript==
+// @name         末日动漫AcgnX 磁力链接复制助手
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  在 AcgnX 资源页面添加磁力链接复制功能，支持勾选批量复制和单条复制
+// @author       You
+// @match        https://share.acgnx.cc/*
+// @match        https://www.acgnx.se/*
+// @match        https://share.acgnx.se/*
+// @grant        GM_setClipboard
+// @grant        GM_notification
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const STYLE = `
+        /* 复制按钮样式 */
+        .mag-copy-btn {
+            display: inline-block;
+            margin-left: 4px;
+            padding: 2px 8px;
+            font-size: 12px;
+            line-height: 18px;
+            color: #fff;
+            background: #5b8def;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            vertical-align: middle;
+            white-space: nowrap;
+            transition: background .2s;
+        }
+        .mag-copy-btn:hover { background: #3a6fd8; }
+        .mag-copy-btn.copied { background: #52c41a; }
+
+        /* 勾选框列 */
+        .mag-checkbox {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            vertical-align: middle;
+            accent-color: #5b8def;
+        }
+
+        /* 底部浮动工具栏 */
+        #mag-toolbar {
+            position: fixed;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 99999;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 24px;
+            background: rgba(30, 32, 34, 0.95);
+            border-radius: 12px 12px 0 0;
+            box-shadow: 0 -2px 16px rgba(0,0,0,0.35);
+            color: #e8e6e3;
+            font-size: 14px;
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            transition: opacity .3s, transform .3s;
+        }
+        #mag-toolbar.hidden {
+            opacity: 0;
+            transform: translateX(-50%) translateY(100%);
+            pointer-events: none;
+        }
+        #mag-toolbar label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+        #mag-toolbar .tb-btn {
+            padding: 6px 18px;
+            font-size: 13px;
+            color: #fff;
+            background: #5b8def;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background .2s;
+        }
+        #mag-toolbar .tb-btn:hover { background: #3a6fd8; }
+        #mag-toolbar .tb-btn.copy-selected { background: #52c41a; }
+        #mag-toolbar .tb-btn.copy-selected:hover { background: #3db812; }
+        #mag-toolbar .tb-btn:disabled {
+            background: #555;
+            cursor: not-allowed;
+            color: #999;
+        }
+        #mag-toolbar .tb-count {
+            min-width: 80px;
+            text-align: center;
+            font-weight: bold;
+            color: #5b8def;
+        }
+    `;
+
+    // 注入样式
+    const styleEl = document.createElement('style');
+    styleEl.textContent = STYLE;
+    document.head.appendChild(styleEl);
+
+    const listTable = document.getElementById('listTable');
+    if (!listTable) return;
+    listTable.style.tableLayout = 'auto';
+
+    const thead = listTable.querySelector('thead');
+    const tbody = listTable.querySelector('#data_list');
+
+    // ---- 表头修改磁链列名 + 加全选勾选框 ----
+    const selectAllCb = document.createElement('input');
+    selectAllCb.type = 'checkbox';
+    selectAllCb.className = 'mag-checkbox';
+    selectAllCb.title = '全选 / 取消全选';
+    selectAllCb.style.marginRight = '6px';
+    selectAllCb.addEventListener('change', function () {
+        tbody.querySelectorAll('.mag-row-cb').forEach(cb => { cb.checked = selectAllCb.checked; });
+        updateToolbar();
+    });
+    const magTh = thead.querySelector('th.l5');
+    if (magTh) {
+        magTh.textContent = '';
+        magTh.style.cssText = 'width:110px; min-width:110px; text-align:left; padding-left:4px;';
+        magTh.appendChild(selectAllCb);
+        magTh.appendChild(document.createTextNode('复制操作'));
+    }
+
+    // ---- 每行：替换磁链/PikPak按钮为勾选框+复制按钮 ----
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach(row => {
+        // 找到磁力链接所在的 td，替换内容
+        const magnetLink = row.querySelector('a[id="magnet"]');
+        if (magnetLink) {
+            const magnetUrl = decodeHtmlEntities(magnetLink.getAttribute('href'));
+            const td = magnetLink.parentElement;
+            // 清空原内容（移除磁力下载图标 + PikPak按钮）
+            td.innerHTML = '';
+            td.removeAttribute('nowrap');
+            td.style.cssText = 'white-space:nowrap; width:110px; min-width:110px; overflow:visible; text-align:left; padding-left:4px;';
+
+            // 添加勾选框（放在复制按钮旁边）
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'mag-checkbox mag-row-cb';
+            cb.style.marginRight = '4px';
+            cb.addEventListener('change', updateToolbar);
+            td.appendChild(cb);
+
+            // 添加磁链按钮
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'mag-copy-btn';
+            copyBtn.textContent = '磁链';
+            copyBtn.title = magnetUrl;
+            copyBtn.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                copyToClipboard(magnetUrl, copyBtn);
+            });
+            td.appendChild(copyBtn);
+        }
+    });
+
+    // ---- 底部浮动工具栏 ----
+    const toolbar = document.createElement('div');
+    toolbar.id = 'mag-toolbar';
+    toolbar.className = 'hidden';
+    toolbar.innerHTML = `
+        <label>
+            <input type="checkbox" class="mag-checkbox" id="tb-select-all"> 全选
+        </label>
+        <span class="tb-count" id="tb-count">已选 0 项</span>
+        <button class="tb-btn copy-selected" id="tb-copy-selected" disabled>复制已选磁链</button>
+        <button class="tb-btn" id="tb-copy-all">复制本页全部磁链</button>
+        <button class="tb-btn" id="tb-cancel" style="background:#ff4d4f;">取消</button>
+    `;
+    document.body.appendChild(toolbar);
+
+    // 工具栏 - 全选
+    const tbSelectAll = document.getElementById('tb-select-all');
+    tbSelectAll.addEventListener('change', function () {
+        tbody.querySelectorAll('.mag-row-cb').forEach(cb => { cb.checked = tbSelectAll.checked; });
+        selectAllCb.checked = tbSelectAll.checked;
+        updateToolbar();
+    });
+
+    // 工具栏 - 复制已选
+    document.getElementById('tb-copy-selected').addEventListener('click', function () {
+        const selected = getSelectedMagnets();
+        if (selected.length === 0) return;
+        copyToClipboard(selected.join('\n'), this, selected.length + ' 条磁力链接已复制');
+    });
+
+    // 工具栏 - 复制全部
+    document.getElementById('tb-copy-all').addEventListener('click', function () {
+        const all = getAllMagnets();
+        if (all.length === 0) return;
+        copyToClipboard(all.join('\n'), this, all.length + ' 条磁力链接已复制');
+    });
+
+    // 工具栏 - 取消
+    document.getElementById('tb-cancel').addEventListener('click', function () {
+        tbody.querySelectorAll('.mag-row-cb').forEach(cb => { cb.checked = false; });
+        selectAllCb.checked = false;
+        tbSelectAll.checked = false;
+        updateToolbar();
+    });
+
+    // ---- 辅助函数 ----
+    function decodeHtmlEntities(str) {
+        const txt = document.createElement('textarea');
+        txt.innerHTML = str;
+        return txt.value;
+    }
+
+    function getSelectedMagnets() {
+        const magnets = [];
+        const checkboxes = tbody.querySelectorAll('.mag-row-cb:checked');
+        checkboxes.forEach(cb => {
+            const row = cb.closest('tr');
+            const copyBtn = row.querySelector('.mag-copy-btn');
+            if (copyBtn && copyBtn.title) {
+                magnets.push(copyBtn.title);
+            }
+        });
+        return magnets;
+    }
+
+    function getAllMagnets() {
+        const magnets = [];
+        const copyBtns = tbody.querySelectorAll('.mag-copy-btn');
+        copyBtns.forEach(btn => {
+            if (btn.title) magnets.push(btn.title);
+        });
+        return magnets;
+    }
+
+    function updateToolbar() {
+        const total = tbody.querySelectorAll('.mag-row-cb').length;
+        const checked = tbody.querySelectorAll('.mag-row-cb:checked').length;
+        const countEl = document.getElementById('tb-count');
+        const copyBtn = document.getElementById('tb-copy-selected');
+
+        countEl.textContent = '已选 ' + checked + ' / ' + total + ' 项';
+        copyBtn.disabled = checked === 0;
+
+        // 显示/隐藏工具栏
+        if (checked > 0) {
+            toolbar.classList.remove('hidden');
+        } else {
+            toolbar.classList.add('hidden');
+        }
+
+        // 同步全选状态
+        selectAllCb.checked = checked > 0 && checked === total;
+        tbSelectAll.checked = checked > 0 && checked === total;
+    }
+
+    function copyToClipboard(text, btnEl, successMsg) {
+        const doCopy = (success) => {
+            if (!success) {
+                // fallback
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); success = true; } catch (e) { success = false; }
+                document.body.removeChild(ta);
+            }
+            if (success !== false) {
+                if (btnEl) {
+                    const orig = btnEl.textContent;
+                    btnEl.textContent = '已复制!';
+                    btnEl.classList.add('copied');
+                    setTimeout(() => {
+                        btnEl.textContent = orig;
+                        btnEl.classList.remove('copied');
+                    }, 1500);
+                }
+                if (successMsg) {
+                    showNotification(successMsg);
+                } else {
+                    showNotification('磁力链接已复制');
+                }
+            }
+        };
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(() => doCopy(true)).catch(() => doCopy(false));
+        } else {
+            doCopy(false);
+        }
+    }
+
+    function showNotification(msg) {
+        // 优先用 GM_notification
+        if (typeof GM_notification !== 'undefined') {
+            try { GM_notification({ text: msg, title: '磁力复制助手', timeout: 2000 }); return; } catch (e) {}
+        }
+        // fallback: 页面内 toast
+        let toast = document.createElement('div');
+        toast.textContent = msg;
+        toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);padding:10px 28px;background:rgba(82,196,26,0.95);color:#fff;border-radius:8px;font-size:14px;z-index:999999;pointer-events:none;opacity:0;transition:opacity .3s;';
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => { toast.style.opacity = '1'; });
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 400);
+        }, 2000);
+    }
+})();
